@@ -105,10 +105,18 @@ function MonitorItem({ currentScreen, openScreen, theme }: PluginSidebarItemProp
     data?.system && data.system.commitLimitBytes > 0
       ? data.system.committedBytes / data.system.commitLimitBytes
       : null;
+  // Same scope as the detail screen: exited agents are leftovers, not running
+  // agent CLI instances, so they stay out of the sidebar summary.
+  const running = data?.instances.filter((item) => item.agent?.status !== "closed") ?? [];
+  const runningRss = running.reduce((sum, item) => sum + item.totalRssBytes, 0);
+  const anyPrivate = running.some((item) => item.totalPrivateBytes != null);
+  const runningPrivate = anyPrivate
+    ? running.reduce((sum, item) => sum + (item.totalPrivateBytes ?? 0), 0)
+    : null;
   const summary = data
-    ? data.totalPrivateBytes != null
-      ? `${data.instanceCount} · ${formatMb(data.totalRssBytes)}/${formatMb(data.totalPrivateBytes)} MB`
-      : `${data.instanceCount} · ${formatMb(data.totalRssBytes)} MB`
+    ? runningPrivate != null
+      ? `${running.length} · ${formatMb(runningRss)}/${formatMb(runningPrivate)} MB`
+      : `${running.length} · ${formatMb(runningRss)} MB`
     : "…";
   const summaryColor =
     commitRatio != null && commitRatio >= 0.9

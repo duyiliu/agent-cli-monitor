@@ -64,6 +64,7 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
   const compact = layout.compact;
   const [closingAgentId, setClosingAgentId] = useState<string | null>(null);
   const [closeError, setCloseError] = useState<string | null>(null);
+  const [showClosed, setShowClosed] = useState(false);
   const pollTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
   useEffect(
     () => () => {
@@ -111,6 +112,13 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
       statValue: { color: theme.colors.foreground, fontSize: compact ? 28 : 36, fontVariant: ["tabular-nums" as const] },
       statLabel: { color: theme.colors.foregroundMuted, fontSize: compact ? 12 : 13 },
       sectionTitle: { color: theme.colors.foregroundMuted, fontSize: 12, marginTop: 4 },
+      sectionRow: {
+        flexDirection: "row" as const,
+        alignItems: "center" as const,
+        justifyContent: "space-between" as const,
+        gap: 12,
+      },
+      sectionToggle: { color: theme.colors.accent, fontSize: 12 },
       groupBlock: { paddingTop: compact ? 10 : 14 },
       groupHeader: {
         gap: 2,
@@ -188,6 +196,28 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
         .join(" · ")
     : null;
 
+  // Instances whose agent already exited keep running, but they are no longer
+  // agent sessions, so they stay out of the default view and its totals. The
+  // toggle brings them back for cleanup decisions.
+  const allInstances = useMemo(() => data?.instances ?? [], [data]);
+  const visibleInstances = useMemo(
+    () => allInstances.filter((item) => showClosed || item.agent?.status !== "closed"),
+    [allInstances, showClosed],
+  );
+  const closedCount = useMemo(
+    () => allInstances.filter((item) => item.agent?.status === "closed").length,
+    [allInstances],
+  );
+  const visibleTotals = useMemo(() => {
+    const anyPrivate = visibleInstances.some((item) => item.totalPrivateBytes != null);
+    return {
+      rssBytes: visibleInstances.reduce((sum, item) => sum + item.totalRssBytes, 0),
+      privateBytes: anyPrivate
+        ? visibleInstances.reduce((sum, item) => sum + (item.totalPrivateBytes ?? 0), 0)
+        : null,
+    };
+  }, [visibleInstances]);
+
   // Group instances by workspace, the parent level in Paseo's sidebar, and
   // total each group. Groups and their rows both follow commit usage so the
   // heaviest workspace stays on top.
@@ -206,7 +236,7 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
         lastActivityAt: string | null;
       }
     >();
-    for (const instance of data?.instances ?? []) {
+    for (const instance of visibleInstances) {
       const workspaceId = instance.agent?.workspaceId ?? null;
       const key = workspaceId ?? "__unassigned__";
       let group = byWorkspace.get(key);
@@ -243,10 +273,21 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
         group.lastActivityAt = activityAt;
       }
     }
+    // Rows follow commit usage too, with live sessions above exited ones so a
+    // mixed group still reads as a session list.
+    for (const group of byWorkspace.values()) {
+      group.instances.sort((a, b) => {
+        const exited = (item: (typeof group.instances)[number]) => (item.agent?.status === "closed" ? 1 : 0);
+        return (
+          exited(a) - exited(b) ||
+          (b.totalPrivateBytes ?? b.totalRssBytes) - (a.totalPrivateBytes ?? a.totalRssBytes)
+        );
+      });
+    }
     return [...byWorkspace.values()].sort(
       (a, b) => (b.privateBytes ?? b.rssBytes) - (a.privateBytes ?? a.rssBytes),
     );
-  }, [data]);
+  }, [visibleInstances]);
 
   return (
     <View style={styles.screen}>
@@ -264,19 +305,19 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
           </Text>
         </View>
         <View>
-          <Text style={styles.statValue}>{data ? `${groups.length} / ${data.instanceCount}` : "…"}</Text>
+          <Text style={styles.statValue}>{data ? `${groups.length} / ${visibleInstances.length}` : "…"}</Text>
           <Text style={styles.statLabel}>workspace / 实例</Text>
         </View>
         <View>
           <Text style={styles.statValue}>
             {data ? (
-              data.totalPrivateBytes != null ? (
+              visibleTotals.privateBytes != null ? (
                 <>
-                  <Text style={styles.memDim}>{formatMb(data.totalRssBytes)} / </Text>
-                  {formatMb(data.totalPrivateBytes)}
+                  <Text style={styles.memDim}>{formatMb(visibleTotals.rssBytes)} / </Text>
+                  {formatMb(visibleTotals.privateBytes)}
                 </>
               ) : (
-                formatMb(data.totalRssBytes)
+                formatMb(visibleTotals.rssBytes)
               )
             ) : (
               "…"
@@ -296,7 +337,20 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
         </Text>
       ) : null}
 
-      <Text style={styles.sectionTitle}>实例明细（按 workspace 分组,内存=工作集/提交）</Text>
+      <View style={styles.sectionRow}>
+        <Text style={styles.sectionTitle}>实例明细（按 workspace 分组,内存=工作集/提交）</Text>
+        {closedCount > 0 ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={showClosed ? "隐藏已关闭实例" : "显示已关闭实例"}
+            onPress={() => setShowClosed((value) => !value)}
+          >
+            <Text style={styles.sectionToggle}>
+              {showClosed ? `隐藏已关闭 ${closedCount}` : `显示已关闭 ${closedCount}`}
+            </Text>
+          </Pressable>
+        ) : null}
+      </View>
       <ScrollView style={{ flex: 1 }}>
         {groups.map((group) => {
           const workspaceId = group.workspaceId;
@@ -440,8 +494,12 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
             </View>
           );
         })}
-        {data && data.instances.length === 0 ? (
-          <Text style={styles.mutedText}>当前没有运行中的 agent CLI 进程。</Text>
+        {data && visibleInstances.length === 0 ? (
+          <Text style={styles.mutedText}>
+            {closedCount > 0
+              ? `没有运行中的实例,${closedCount} 个已关闭实例已隐藏。`
+              : "当前没有运行中的 agent CLI 进程。"}
+          </Text>
         ) : null}
         {closeError ? <Text style={styles.mutedText}>关闭失败:{closeError}</Text> : null}
       </ScrollView>
