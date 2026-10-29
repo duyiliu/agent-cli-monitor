@@ -350,13 +350,26 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
                 const lastUsedAt = agent?.lastUserMessageAt ?? agent?.lastActivityAt ?? null;
                 const lastUsed = lastUsedAt ? formatLastUsed(lastUsedAt) : null;
                 if (lastUsed) metaParts.push(`${agent?.lastUserMessageAt ? "最近使用" : "最近活动"} ${lastUsed}`);
+                // A closed agent has no runtime left to close, so the button is
+                // meaningless there: whatever still carries the marker was started
+                // later and only inherited the environment.
+                const runtimeAlive = agent != null && agent.status !== "closed";
                 const idleHours = agent?.lastUserMessageAt
                   ? (Date.now() - Date.parse(agent.lastUserMessageAt)) / 3600000
                   : null;
                 const canClose =
-                  agent != null &&
+                  runtimeAlive &&
                   agent.status !== "running" &&
-                  (agent.archivedAt != null || (idleHours != null && idleHours >= IDLE_CLOSE_HOURS));
+                  idleHours != null &&
+                  idleHours >= IDLE_CLOSE_HOURS;
+                const agentEndedAt = agent?.archivedAt ?? agent?.lastActivityAt ?? null;
+                const inheritedOnly =
+                  agent != null &&
+                  !runtimeAlive &&
+                  instance.startedAt != null &&
+                  agentEndedAt != null &&
+                  Date.parse(instance.startedAt) > Date.parse(agentEndedAt);
+                if (inheritedOnly) metaParts.push("独立进程(继承环境标记)");
                 metaParts.push(instance.agentId.slice(0, 7));
                 if (instance.agentCwd) metaParts.push(instance.agentCwd);
                 const topProcesses = instance.processes.slice(0, TOP_PROCESSES);
@@ -394,17 +407,19 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
                         )}
                       </Text>
                       {canClose ? <Text style={styles.idleBadge}>可关闭</Text> : null}
-                      <Pressable
-                        accessibilityRole="button"
-                        accessibilityLabel={`关闭 agent ${agentLabel}`}
-                        disabled={closingAgentId === instance.agentId}
-                        style={[styles.closeButton, canClose ? styles.closeButtonIdle : null]}
-                        onPress={() => handleClose(instance.agentId)}
-                      >
-                        <Text style={[styles.closeButtonText, canClose ? styles.closeButtonIdleText : null]}>
-                          {closingAgentId === instance.agentId ? "…" : "关闭 agent"}
-                        </Text>
-                      </Pressable>
+                      {runtimeAlive ? (
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityLabel={`关闭 agent ${agentLabel}`}
+                          disabled={closingAgentId === instance.agentId}
+                          style={[styles.closeButton, canClose ? styles.closeButtonIdle : null]}
+                          onPress={() => handleClose(instance.agentId)}
+                        >
+                          <Text style={[styles.closeButtonText, canClose ? styles.closeButtonIdleText : null]}>
+                            {closingAgentId === instance.agentId ? "…" : "关闭 agent"}
+                          </Text>
+                        </Pressable>
+                      ) : null}
                     </View>
                     <Text style={styles.command} numberOfLines={1}>
                       {instance.command}

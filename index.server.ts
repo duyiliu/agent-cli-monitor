@@ -61,6 +61,16 @@ export default function contribute(server: PluginServerContext) {
       listAgentSessions(paseo),
       listAgentCliInstances(),
     ]);
+    // Closing an agent that already exited is a daemon no-op: the call reports
+    // success while the leftover descendants keep running. Refuse with an
+    // actionable message instead of pretending the row was reclaimed.
+    const target = agents?.items.find((item) => item.id === agentId);
+    if (target?.status === "closed") {
+      return {
+        ok: false,
+        error: "该 agent 运行时已关闭,行内进程是继承环境标记的独立/残留进程,请用对应服务管理器停止",
+      };
+    }
     // The caller must be currently loaded by the daemon — agents owning a live
     // CLI process provably are. Try them first, then the target itself (also
     // loaded whenever it has a process), then the rest as a fallback sweep.
