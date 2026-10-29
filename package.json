@@ -1,6 +1,6 @@
 {
   "name": "@duyiliu/agent-cli-monitor",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Shows running agent CLI instances and their memory use in the Paseo sidebar.",
   "repository": {
     "type": "git",

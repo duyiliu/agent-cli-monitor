@@ -75,7 +75,10 @@ export default function contribute(server: PluginServerContext) {
     // CLI process provably are. Try them first, then the target itself (also
     // loaded whenever it has a process), then the rest as a fallback sweep.
     const liveIds = new Set(
-      liveInstances.instances.map((i) => i.agentId).filter((id): id is string => !!id),
+      liveInstances.instances
+        .filter((i) => i.provider)
+        .map((i) => i.agentId)
+        .filter((id): id is string => !!id),
     );
     const candidates = (agents?.items ?? [])
       .slice()

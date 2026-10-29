@@ -29,6 +29,7 @@ export interface AgentCliInstance {
   agentId: string;
   agentCwd: string | null;
   agent: AgentSessionSummary | null;
+  provider: boolean;
   pid: number;
   name: string;
   command: string;
@@ -49,6 +50,7 @@ interface RawProcess {
   startedAt: string | null;
   agentId: string | null;
   agentCwd: string | null;
+  terminalId: string | null;
 }
 
 function baseName(name: string): string {
@@ -60,14 +62,20 @@ function truncate(text: string, max: number): string {
   return text.length > max ? text.slice(0, max) : text;
 }
 
-function parseEnvMarker(text: string): { agentId: string | null; agentCwd: string | null } {
+function parseEnvMarker(text: string): {
+  agentId: string | null;
+  agentCwd: string | null;
+  terminalId: string | null;
+} {
   let agentId: string | null = null;
   let agentCwd: string | null = null;
+  let terminalId: string | null = null;
   for (const entry of text.split("\0")) {
     if (entry.startsWith("PASEO_AGENT_ID=")) agentId = entry.slice(15);
     else if (entry.startsWith("PASEO_AGENT_CWD=")) agentCwd = entry.slice(16);
+    else if (entry.startsWith("PASEO_TERMINAL_ID=")) terminalId = entry.slice(18);
   }
-  return { agentId, agentCwd };
+  return { agentId, agentCwd, terminalId };
 }
 
 // Reads PASEO_AGENT_ID / PASEO_AGENT_CWD out of every process's environment
@@ -134,11 +142,13 @@ Add-Type -TypeDefinition $source -Language CSharp
 $rows = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name,WorkingSetSize,PrivatePageCount,CommandLine,CreationDate | ForEach-Object {
   $agentId = $null
   $agentCwd = $null
+  $terminalId = $null
   $block = [ProcEnv]::ReadEnvBlock([int]$_.ProcessId, 262144)
   if ($block -and -not $block.StartsWith("ERR:")) {
     foreach ($entry in ($block -split "\0")) {
       if ($entry.StartsWith("PASEO_AGENT_ID=")) { $agentId = $entry.Substring(15) }
       elseif ($entry.StartsWith("PASEO_AGENT_CWD=")) { $agentCwd = $entry.Substring(16) }
+      elseif ($entry.StartsWith("PASEO_TERMINAL_ID=")) { $terminalId = $entry.Substring(18) }
     }
   }
   [pscustomobject]@{
@@ -151,6 +161,7 @@ $rows = @(Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,Name
     StartedAt = $(if ($_.CreationDate) { ([datetime]$_.CreationDate).ToUniversalTime().ToString("o") } else { $null })
     AgentId = $agentId
     AgentCwd = $agentCwd
+    TerminalId = $terminalId
   }
 })
 $committed = $null
@@ -199,6 +210,7 @@ async function listWindows(): Promise<{ processes: RawProcess[]; systemCommit: S
       StartedAt?: string | null;
       AgentId?: string | null;
       AgentCwd?: string | null;
+      TerminalId?: string | null;
     };
     if (!r.ProcessId || !r.Name) continue;
     out.push({
@@ -211,6 +223,7 @@ async function listWindows(): Promise<{ processes: RawProcess[]; systemCommit: S
       startedAt: r.StartedAt ?? null,
       agentId: r.AgentId ?? null,
       agentCwd: r.AgentCwd ?? null,
+      terminalId: r.TerminalId ?? null,
     });
   }
   return { processes: out, systemCommit };
@@ -247,6 +260,7 @@ async function listPosix(): Promise<RawProcess[]> {
       startedAt: parseEtime(etime),
       agentId: null,
       agentCwd: null,
+      terminalId: null,
     });
   }
   return out;
@@ -261,6 +275,7 @@ async function fillLinuxEnvironments(processes: RawProcess[]): Promise<void> {
         const env = parseEnvMarker(raw.toString("utf8"));
         proc.agentId = env.agentId;
         proc.agentCwd = env.agentCwd;
+        proc.terminalId = env.terminalId;
       } catch {
         // Unreadable (kernel threads, other users) — stays unmarked.
       }
@@ -279,7 +294,10 @@ async function fillPsEnvironments(processes: RawProcess[]): Promise<void> {
   } catch {
     return;
   }
-  const envByPid = new Map<number, { agentId: string | null; agentCwd: string | null }>();
+  const envByPid = new Map<
+    number,
+    { agentId: string | null; agentCwd: string | null; terminalId: string | null }
+  >();
   for (const line of stdout.split("\n")) {
     const match = /^\s*(\d+)\s+(.*)$/.exec(line);
     if (!match) continue;
@@ -288,13 +306,15 @@ async function fillPsEnvironments(processes: RawProcess[]): Promise<void> {
     if (!agentId) continue;
     const agentCwd =
       /PASEO_AGENT_CWD=(.+?)(?=\s+[A-Za-z_][A-Za-z0-9_]*=|\s*$)/.exec(tail)?.[1] ?? null;
-    envByPid.set(Number(match[1]), { agentId, agentCwd });
+    const terminalId = /PASEO_TERMINAL_ID=(\S+)/.exec(tail)?.[1] ?? null;
+    envByPid.set(Number(match[1]), { agentId, agentCwd, terminalId });
   }
   for (const proc of processes) {
     const env = envByPid.get(proc.pid);
     if (env) {
       proc.agentId = env.agentId;
       proc.agentCwd = env.agentCwd;
+      proc.terminalId = env.terminalId;
     }
   }
 }
@@ -305,6 +325,12 @@ async function fillPsEnvironments(processes: RawProcess[]): Promise<void> {
 // is where most of the memory actually sits. Processes without the marker
 // (manually started CLIs, desktop apps embedding the same binaries) are
 // excluded entirely.
+//
+// The daemon spawns provider CLIs itself, so a marked process whose parent is
+// a daemon process is a provider root; its whole tree is that agent's runtime.
+// Marked processes rooted anywhere else (terminals, shells, services launched
+// later from a stale session) are not the provider — they inherited the marker
+// and are reported as an independent instance instead.
 //
 // Ownership is collected as a pid set rather than a tree walk from one root.
 // An agent legitimately owns several marked processes — its launcher shell, a
@@ -318,6 +344,14 @@ function buildInstances(processes: RawProcess[]): AgentCliInstance[] {
     else childrenByPpid.set(proc.ppid, [proc]);
   }
 
+  // The daemon runs under @getpaseo packages (or the paseo binary). Provider
+  // CLIs are its direct children.
+  const daemonPids = new Set<number>(
+    processes
+      .filter((proc) => /@getpaseo[/\\]/i.test(proc.command) || baseName(proc.name) === "paseo")
+      .map((proc) => proc.pid),
+  );
+
   const markedByAgent = new Map<string, RawProcess[]>();
   for (const proc of processes) {
     if (!proc.agentId) continue;
@@ -326,22 +360,31 @@ function buildInstances(processes: RawProcess[]): AgentCliInstance[] {
     else markedByAgent.set(proc.agentId, [proc]);
   }
 
-  const instances: AgentCliInstance[] = [];
-  for (const [agentId, marked] of markedByAgent) {
-    // Fold every marked process and its descendants into one pid set. A child
-    // carrying another agent's marker is that agent's business, not ours.
+  const foldTree = (
+    roots: RawProcess[],
+    agentId: string,
+    blocked?: Map<number, RawProcess>,
+  ): Map<number, RawProcess> => {
     const owned = new Map<number, RawProcess>();
-    const queue = [...marked];
+    const queue = [...roots];
     while (queue.length > 0) {
       const proc = queue.shift()!;
-      if (owned.has(proc.pid)) continue;
+      if (owned.has(proc.pid) || blocked?.has(proc.pid)) continue;
       owned.set(proc.pid, proc);
       for (const child of childrenByPpid.get(proc.pid) ?? []) {
         if (child.agentId && child.agentId !== agentId) continue;
         queue.push(child);
       }
     }
+    return owned;
+  };
 
+  const makeInstance = (
+    agentId: string,
+    agentCwd: string | null,
+    owned: Map<number, RawProcess>,
+    provider: boolean,
+  ): AgentCliInstance => {
     const members = [...owned.values()];
     members.sort((a, b) => (b.privateBytes ?? b.rssBytes) - (a.privateBytes ?? a.rssBytes));
     const heaviest = members[0];
@@ -359,11 +402,11 @@ function buildInstances(processes: RawProcess[]): AgentCliInstance[] {
         startedAt = proc.startedAt;
       }
     }
-
-    instances.push({
+    return {
       agentId,
-      agentCwd: marked.find((proc) => proc.agentCwd)?.agentCwd ?? null,
+      agentCwd,
       agent: null,
+      provider,
       pid: heaviest.pid,
       name: baseName(heaviest.name),
       command: truncate(heaviest.command, 240),
@@ -378,7 +421,28 @@ function buildInstances(processes: RawProcess[]): AgentCliInstance[] {
       processCount: members.length,
       totalRssBytes,
       totalPrivateBytes: anyPrivate ? totalPrivateBytes : null,
-    });
+    };
+  };
+
+  const instances: AgentCliInstance[] = [];
+  for (const [agentId, marked] of markedByAgent) {
+    // A marked process spawned by the daemon is a provider CLI root. Terminal
+    // env blocks carry PASEO_TERMINAL_ID and are excluded.
+    const providerRoots = marked.filter(
+      (proc) => !proc.terminalId && daemonPids.has(proc.ppid),
+    );
+    const providerOwned =
+      providerRoots.length > 0 ? foldTree(providerRoots, agentId) : new Map<number, RawProcess>();
+    const leftoverRoots = marked.filter((proc) => !providerOwned.has(proc.pid));
+    const independentOwned =
+      leftoverRoots.length > 0 ? foldTree(leftoverRoots, agentId, providerOwned) : new Map<number, RawProcess>();
+    const agentCwd = marked.find((proc) => proc.agentCwd)?.agentCwd ?? null;
+    if (providerOwned.size > 0) {
+      instances.push(makeInstance(agentId, agentCwd, providerOwned, true));
+    }
+    if (independentOwned.size > 0) {
+      instances.push(makeInstance(agentId, agentCwd, independentOwned, false));
+    }
   }
 
   // Sort by committed (private) bytes when available — that's what blows the

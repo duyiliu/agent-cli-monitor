@@ -26,6 +26,7 @@ const cliInstance = z.object({
   agentId: z.string(),
   agentCwd: z.string().nullable(),
   agent: agentSession.nullable(),
+  provider: z.boolean(),
   pid: z.number(),
   name: z.string(),
   command: z.string(),

@@ -196,18 +196,18 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
         .join(" · ")
     : null;
 
-  // Instances whose agent already exited keep running, but they are no longer
-  // agent sessions, so they stay out of the default view and its totals. The
-  // toggle brings them back for cleanup decisions.
+  // Only provider trees (marked processes spawned by the daemon) count as the
+  // agent's runtime; inherited-marker and exited instances are leftovers and
+  // stay out of the default view and its totals. The toggle brings them back.
   const allInstances = useMemo(() => data?.instances ?? [], [data]);
   const visibleInstances = useMemo(
-    () => allInstances.filter((item) => showClosed || item.agent?.status !== "closed"),
+    () =>
+      allInstances.filter(
+        (item) => showClosed || (item.provider !== false && item.agent?.status !== "closed"),
+      ),
     [allInstances, showClosed],
   );
-  const closedCount = useMemo(
-    () => allInstances.filter((item) => item.agent?.status === "closed").length,
-    [allInstances],
-  );
+  const hiddenCount = allInstances.length - visibleInstances.length;
   const visibleTotals = useMemo(() => {
     const anyPrivate = visibleInstances.some((item) => item.totalPrivateBytes != null);
     return {
@@ -277,7 +277,8 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
     // mixed group still reads as a session list.
     for (const group of byWorkspace.values()) {
       group.instances.sort((a, b) => {
-        const exited = (item: (typeof group.instances)[number]) => (item.agent?.status === "closed" ? 1 : 0);
+        const exited = (item: (typeof group.instances)[number]) =>
+          item.provider === false || item.agent?.status === "closed" ? 1 : 0;
         return (
           exited(a) - exited(b) ||
           (b.totalPrivateBytes ?? b.totalRssBytes) - (a.totalPrivateBytes ?? a.totalRssBytes)
@@ -339,14 +340,14 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
 
       <View style={styles.sectionRow}>
         <Text style={styles.sectionTitle}>实例明细（按 workspace 分组,内存=工作集/提交）</Text>
-        {closedCount > 0 ? (
+        {hiddenCount > 0 ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={showClosed ? "隐藏已关闭实例" : "显示已关闭实例"}
+            accessibilityLabel={showClosed ? "隐藏已退出/独立实例" : "显示已退出/独立实例"}
             onPress={() => setShowClosed((value) => !value)}
           >
             <Text style={styles.sectionToggle}>
-              {showClosed ? `隐藏已关闭 ${closedCount}` : `显示已关闭 ${closedCount}`}
+              {showClosed ? `隐藏已退出/独立 ${hiddenCount}` : `显示已退出/独立 ${hiddenCount}`}
             </Text>
           </Pressable>
         ) : null}
@@ -404,10 +405,11 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
                 const lastUsedAt = agent?.lastUserMessageAt ?? agent?.lastActivityAt ?? null;
                 const lastUsed = lastUsedAt ? formatLastUsed(lastUsedAt) : null;
                 if (lastUsed) metaParts.push(`${agent?.lastUserMessageAt ? "最近使用" : "最近活动"} ${lastUsed}`);
-                // A closed agent has no runtime left to close, so the button is
-                // meaningless there: whatever still carries the marker was started
-                // later and only inherited the environment.
-                const runtimeAlive = agent != null && agent.status !== "closed";
+                // A closed agent has no runtime left to close, and an
+                // independent instance is only marker-inherited: the button is
+                // meaningless in both cases.
+                const runtimeAlive =
+                  agent != null && agent.status !== "closed" && instance.provider !== false;
                 const idleHours = agent?.lastUserMessageAt
                   ? (Date.now() - Date.parse(agent.lastUserMessageAt)) / 3600000
                   : null;
@@ -416,14 +418,7 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
                   agent.status !== "running" &&
                   idleHours != null &&
                   idleHours >= IDLE_CLOSE_HOURS;
-                const agentEndedAt = agent?.archivedAt ?? agent?.lastActivityAt ?? null;
-                const inheritedOnly =
-                  agent != null &&
-                  !runtimeAlive &&
-                  instance.startedAt != null &&
-                  agentEndedAt != null &&
-                  Date.parse(instance.startedAt) > Date.parse(agentEndedAt);
-                if (inheritedOnly) metaParts.push("独立进程(继承环境标记)");
+                if (instance.provider === false) metaParts.push("独立进程(继承环境标记)");
                 metaParts.push(instance.agentId.slice(0, 7));
                 if (instance.agentCwd) metaParts.push(instance.agentCwd);
                 const topProcesses = instance.processes.slice(0, TOP_PROCESSES);
@@ -433,7 +428,7 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
                   </Text>
                 );
                 return (
-                  <View key={instance.agentId} style={styles.instanceBlock}>
+                  <View key={`${instance.agentId}:${instance.provider ? "p" : "i"}`} style={styles.instanceBlock}>
                     {navigation?.openAgent ? (
                       <Pressable
                         accessibilityRole="link"
@@ -496,8 +491,8 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
         })}
         {data && visibleInstances.length === 0 ? (
           <Text style={styles.mutedText}>
-            {closedCount > 0
-              ? `没有运行中的实例,${closedCount} 个已关闭实例已隐藏。`
+            {hiddenCount > 0
+              ? `没有运行中的实例,${hiddenCount} 个已退出/独立实例已隐藏。`
               : "当前没有运行中的 agent CLI 进程。"}
           </Text>
         ) : null}

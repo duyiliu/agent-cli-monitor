@@ -107,7 +107,9 @@ function MonitorItem({ currentScreen, openScreen, theme }: PluginSidebarItemProp
       : null;
   // Same scope as the detail screen: exited agents are leftovers, not running
   // agent CLI instances, so they stay out of the sidebar summary.
-  const running = data?.instances.filter((item) => item.agent?.status !== "closed") ?? [];
+  const running =
+    data?.instances.filter((item) => item.provider !== false && item.agent?.status !== "closed") ??
+    [];
   const runningRss = running.reduce((sum, item) => sum + item.totalRssBytes, 0);
   const anyPrivate = running.some((item) => item.totalPrivateBytes != null);
   const runningPrivate = anyPrivate
