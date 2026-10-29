@@ -343,11 +343,11 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
         {hiddenCount > 0 ? (
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={showClosed ? "隐藏已退出/独立实例" : "显示已退出/独立实例"}
+            accessibilityLabel={showClosed ? "隐藏其他进程" : "显示其他进程"}
             onPress={() => setShowClosed((value) => !value)}
           >
             <Text style={styles.sectionToggle}>
-              {showClosed ? `隐藏已退出/独立 ${hiddenCount}` : `显示已退出/独立 ${hiddenCount}`}
+              {showClosed ? `隐藏其他进程 ${hiddenCount}` : `显示其他进程 ${hiddenCount}`}
             </Text>
           </Pressable>
         ) : null}
@@ -418,7 +418,7 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
                   agent.status !== "running" &&
                   idleHours != null &&
                   idleHours >= IDLE_CLOSE_HOURS;
-                if (instance.provider === false) metaParts.push("独立进程(继承环境标记)");
+                if (instance.provider === false) metaParts.push("非 provider");
                 metaParts.push(instance.agentId.slice(0, 7));
                 if (instance.agentCwd) metaParts.push(instance.agentCwd);
                 const topProcesses = instance.processes.slice(0, TOP_PROCESSES);
@@ -492,7 +492,7 @@ export function MonitorScreen({ theme, layout, navigation }: PluginScreenProps) 
         {data && visibleInstances.length === 0 ? (
           <Text style={styles.mutedText}>
             {hiddenCount > 0
-              ? `没有运行中的实例,${hiddenCount} 个已退出/独立实例已隐藏。`
+              ? `没有运行中的实例,${hiddenCount} 个其他进程已隐藏。`
               : "当前没有运行中的 agent CLI 进程。"}
           </Text>
         ) : null}
